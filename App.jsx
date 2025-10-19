@@ -11,14 +11,14 @@ import {
     PermissionsAndroid, 
     Platform, 
     FlatList,
-    // Note: If targeting Android API 34+, you may need to check for Bluetooth Adapter enabling manually
+    Dimensions, 
 } from 'react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
+import { BleManager } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 
+const { width } = Dimensions.get('window');
+
 // Inicialización de BleManager
-// 💡 Android Note: State restoration isn't critical for standard use on Android, 
-// so default initialization is acceptable.
 const manager = new BleManager(); 
 
 // ----------------------------------------------------------------------------------
@@ -28,15 +28,20 @@ const SERVICE_UUID = '12345678-1234-1234-1234-123456789abc';
 const WRITE_CHAR_UUID = '12345678-1234-1234-1234-123456789abe'; 
 const NOTIFY_CHAR_UUID = '12345678-1234-1234-1234-123456789abd'; 
 
-// --- Utility Functions for Native BLE Data (omitted for brevity) ---
+// --- Utility Functions for Native BLE Data ---
 const encodeData = (str) => {
     return Buffer.from(str, 'utf8').toString('base64');
 };
-const decodeData = (base64) => {
-    return Buffer.from(base64, 'base64').toString('utf8');
-};
 
-// ... (Icon Components and Screen Components remain unchanged) ...
+const decodeData = (base64) => {
+    if (!base64) return '';
+    try {
+        return Buffer.from(base64, 'base64').toString('utf8');
+    } catch (e) {
+        console.error("Error al decodificar Base64:", e);
+        return 'Error de decodificación: ' + base64.substring(0, 10);
+    }
+};
 
 const BackIcon = () => <Text style={{ color: 'white', fontSize: 20, fontWeight: 'bold' }}>{'<'}</Text>;
 const SendIcon = () => <Text style={{ color: 'white', fontSize: 20, fontWeight: 'bold' }}>{'➤'}</Text>;
@@ -54,8 +59,6 @@ const DeviceItem = ({ device, onConnect }) => (
         <Text style={styles.deviceRSSI}>RSSI: {device.rssi || 'N/A'}</Text>
     </TouchableOpacity>
 );
-
-// ... (BluetoothScanScreen, LandingScreen, ChatScreen remain unchanged) ...
 
 const BluetoothScanScreen = ({ onBack, startScan, devices, connectAndNavigate, status, error, stopScan }) => {
     const isScanning = status === 'Scanning';
@@ -245,6 +248,13 @@ export default function App() {
     const [connectedDevice, setConnectedDevice] = useState(null);
     const notifySubscriptionRef = useRef(null); 
     const isScanningRef = useRef(false); 
+    const scanTimeoutRef = useRef(null); 
+
+    // Almacena el ID y texto del último mensaje enviado para filtrar el eco.
+    const lastSentMessageRef = useRef(null); 
+    // Set para almacenar temporalmente los IDs de los mensajes de eco ya procesados
+    const processedEchoesRef = useRef(new Set()); 
+
 
     // --- Utility Functions ---
 
@@ -255,11 +265,11 @@ export default function App() {
             text,
             isSOS,
         };
+        // Siempre usamos el callback de setMessages para evitar race conditions
         setMessages(prev => [...prev, newMessage]);
         console.log(`[${sender.toUpperCase()}] ${text}`);
     }, []);
 
-    // 1. 💡 CORRECTION: Simplify Android permission requests (ACCESS_FINE_LOCATION is often enough for API < 31)
     const requestPermissions = useCallback(async () => {
         if (Platform.OS === 'android') {
             const apiLevel = Platform.Version;
@@ -282,10 +292,8 @@ export default function App() {
                 }
                 return isGranted;
             } else { 
-                // Android 12+ requires BLUETOOTH_SCAN and BLUETOOTH_CONNECT
                 const grantedScan = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
                 const grantedConnect = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-                // LOCATION is often still needed or highly recommended depending on use case.
                 const grantedLocation = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
 
 
@@ -305,31 +313,35 @@ export default function App() {
         return true; 
     }, [logMessage]);
     
-    // 3. 💡 CORRECTION: Pass deviceId to cleanupAndDisconnect to ensure native stack cleanup
     const cleanupAndDisconnect = useCallback(async (deviceId, deviceName = 'Dispositivo') => {
         logMessage('system', `Intentando desconectar de ${deviceName}...`);
 
+        // 1. Remove the monitor subscription FIRST
         if (notifySubscriptionRef.current) {
             notifySubscriptionRef.current.remove();
             notifySubscriptionRef.current = null;
         }
 
+        // 2. Cancel the native connection
         if (deviceId) {
-            // Attempt to cancel connection/disconnect, regardless of current state
             await manager.cancelDeviceConnection(deviceId).catch(e => {
-                // This catch handles the case where the device is already disconnected
                 console.log("Error during disconnect (may be already disconnected):", e.message);
             });
         }
         
+        // 3. Reset state and navigate
         setConnectedDevice(null);
         setStatus('Disconnected');
-        // If we are on the chat screen, go back to scan
-        if (screen === 'chat') { 
-            setScreen('scan');
-        }
+        
+        // 💡 WORKAROUND: Delay navigation slightly to let native thread finish cleanup
+        setTimeout(() => {
+            if (screen === 'chat') { 
+                setScreen('scan');
+            }
+        }, 100); 
+        
         logMessage('system', `Desconectado.`);
-    }, [logMessage, screen]); // Added 'screen' dependency
+    }, [logMessage, screen]); 
 
     useEffect(() => {
         const subscription = manager.onStateChange((state) => {
@@ -337,7 +349,6 @@ export default function App() {
                 logMessage('system', 'Bluetooth Encendido. Listo para escanear.');
             } else {
                 logMessage('system', `Bluetooth State: ${state}. Por favor, activa el Bluetooth.`);
-                // 💡 Improvement: Check for 'Unauthorized' which often means permissions were just denied
                 if (state === 'Unauthorized' || state === 'PoweredOff') {
                      Alert.alert("Bluetooth Requerido", "Por favor, activa el Bluetooth para usar esta aplicación, o acepta los permisos.");
                 }
@@ -349,33 +360,43 @@ export default function App() {
             }
         }, true); 
 
+        // Cleanup function for the effect
         return () => subscription.remove();
-    }, [logMessage, connectedDevice, cleanupAndDisconnect]); // Added dependencies
+    }, [logMessage, connectedDevice, cleanupAndDisconnect]);
 
-    // CORE CONNECTION LOGIC 
     const connectToDevice = useCallback(async (device) => {
         setStatus('Connecting');
         logMessage('system', `Intentando conectar a ${device.name}...`);
         
         try {
+            // 1. Detener el escaneo y limpiar el timeout inmediatamente
             manager.stopDeviceScan();
+            if (scanTimeoutRef.current) {
+                clearTimeout(scanTimeoutRef.current);
+                scanTimeoutRef.current = null;
+            }
+            logMessage('system', 'Escaneo detenido por usuario para iniciar conexión.');
 
-            let connectedDeviceInstance = await manager.connectToDevice(device.id);
 
-            // 💡 Your FIX is good: Ensure discovery runs on the connected instance
-            const fullDevice = await connectedDeviceInstance.discoverAllServicesAndCharacteristicsForDevice();
-            logMessage('system', `Conexión establecida. Descubriendo servicios...`);
+            // 2. Conectar y negociar MTU
+            const connected = await manager.connectToDevice(device.id, { 
+                autoConnect: false,
+                requestMTU: 256 
+            });
+            
+            const fullDevice = await connected.discoverAllServicesAndCharacteristics();
+            logMessage('system', `Conexión establecida. MTU negociado a 256. Descubriendo servicios...`);
 
-            // Automatic disconnection handling
+
             fullDevice.onDisconnected(() => {
                 logMessage('system', `Dispositivo ${fullDevice.name} desconectado inesperadamente.`);
                 Alert.alert("Desconexión", `${fullDevice.name} ha sido desconectado.`);
-                // 💡 FIX: Pass the device ID to ensure clean internal state cleanup
-                cleanupAndDisconnect(fullDevice.id, fullDevice.name); 
+                cleanupAndDisconnect(fullDevice.id, fullDevice.name);
             });
 
-            // Set up Notification (Receiving Data)
-            const subscription = fullDevice.monitorCharacteristicForDevice(
+            // 4. CONFIGURAR NOTIFICACIONES (RECEPCIÓN DE DATOS)
+            const subscription = manager.monitorCharacteristicForDevice(
+                fullDevice.id,
                 SERVICE_UUID,
                 NOTIFY_CHAR_UUID,
                 (error, characteristic) => {
@@ -384,8 +405,30 @@ export default function App() {
                         return;
                     }
                     if (characteristic?.value) {
-                        const receivedString = decodeData(characteristic.value);
-                        logMessage('other', receivedString);
+                        const receivedStringRaw = decodeData(characteristic.value);
+                        const receivedString = receivedStringRaw.trim(); 
+                        const isSOS = receivedString.includes("Emergencia! SOS!");
+
+                        const lastSent = lastSentMessageRef.current;
+                        
+                        const isSelfEcho = lastSent && lastSent.text.trim() === receivedString;
+
+                        if (isSelfEcho) {
+                            if (!processedEchoesRef.current.has(lastSent.id)) {
+                                console.log("Eco local reconocido y aceptado:", lastSent.text);
+                                processedEchoesRef.current.add(lastSent.id); 
+                            } else {
+                                console.log("Eco duplicado bloqueado:", lastSent.text);
+                            }
+                            
+                            setTimeout(() => {
+                                lastSentMessageRef.current = null;
+                                processedEchoesRef.current.delete(lastSent.id);
+                            }, 500); 
+
+                        } else {
+                            logMessage('other', receivedString, isSOS);
+                        }
                     }
                 },
                 'notifyHandle' 
@@ -400,13 +443,11 @@ export default function App() {
         } catch (e) {
             setError(`Fallo de conexión: ${e.message}`);
             logMessage('system', `Error de conexión nativa: ${e.message}`);
-            // Ensure disconnect runs on the device that failed to connect
             cleanupAndDisconnect(device.id); 
         }
     }, [logMessage, cleanupAndDisconnect]);
 
 
-    // 2. 💡 CORRECTION: Optimize Scan - Filter by Service UUID
     const scanDevices = async () => {
         const isPermitted = await requestPermissions();
         if (!isPermitted) {
@@ -415,7 +456,6 @@ export default function App() {
         
         if (isScanningRef.current) return;
 
-        // Check Bluetooth state before starting scan
         const state = await manager.state();
         if (state !== 'PoweredOn') {
             logMessage('system', 'Bluetooth no está activo. Por favor, actívalo.');
@@ -431,36 +471,36 @@ export default function App() {
         isScanningRef.current = true;
         logMessage('system', 'Iniciando escaneo de dispositivos...');
 
-        const scanTimeout = setTimeout(() => {
+        // 💡 ALMACENAR: Guardamos el ID del timeout
+        const id = setTimeout(() => {
             if (isScanningRef.current) { 
-                stopScan(); 
+                stopScan(true); // Pasamos 'true' para indicar que fue por timeout
                 setError('Escaneo terminado. Toca "Escanear" para reintentar.');
-                logMessage('system', 'Escaneo detenido por timeout.');
             }
         }, 15000); 
+        scanTimeoutRef.current = id;
 
-        // 💡 OPTIMIZATION: Scan for devices advertising your specific Service UUID.
-        // This is much faster and more battery-efficient on Android.
+
         manager.startDeviceScan(
             null,
-            null, // Scan options are null
+            null,
             (error, device) => {
                 if (error) {
-                    clearTimeout(scanTimeout);
+                    // Limpiar el timeout si el error ocurre durante el escaneo
+                    if (scanTimeoutRef.current) {
+                        clearTimeout(scanTimeoutRef.current);
+                        scanTimeoutRef.current = null;
+                    }
                     logMessage('system', `Error durante el escaneo: ${error.message}`);
                     setError(`Error durante el escaneo: ${error.message}`);
                     stopScan();
                     return;
                 }
                 
-                // Filtering is now largely redundant if the Service UUID is correct, 
-                // but we keep the uniqueness check.
                 if (
                     device && 
                     !devicesMapRef.current.has(device.id)
                 ) {
-                    // Check for name/advertisement data only if really needed.
-                    // If scanning by UUID, the device should be the target one.
                     devicesMapRef.current.set(device.id, device);
                     setDiscoveredDevices(Array.from(devicesMapRef.current.values()));
                     logMessage('system', `Antena LoRa encontrada: ${device.name || device.id}`);
@@ -469,11 +509,24 @@ export default function App() {
         );
     };
 
-    const stopScan = useCallback(() => {
+    const stopScan = useCallback((isTimeout = false) => {
         manager.stopDeviceScan();
         isScanningRef.current = false;
         setStatus('Disconnected');
-        logMessage('system', 'Escaneo detenido por usuario.');
+
+        // Limpiamos el timeout aquí
+        if (scanTimeoutRef.current) {
+            clearTimeout(scanTimeoutRef.current);
+            scanTimeoutRef.current = null;
+        }
+
+        if (isTimeout) {
+            logMessage('system', 'Escaneo detenido por timeout.');
+        } else {
+            // Solo registramos si no fue por conexión (ya lo registramos en connectToDevice)
+            logMessage('system', 'Escaneo detenido por usuario.'); 
+        }
+
     }, [logMessage]);
 
 
@@ -485,9 +538,22 @@ export default function App() {
             return;
         }
 
+        const tempMessage = {
+            id: Date.now(),
+            text: textToSend.trim(), 
+            isSOS: isSOS,
+            sender: 'me', 
+        };
+
+        // 1. Registrar inmediatamente el mensaje en la pantalla del remitente (burbuja azul, derecha)
+        logMessage(tempMessage.sender, tempMessage.text, tempMessage.isSOS);
+
+        // 2. Almacenar el mensaje para filtrar el eco entrante
+        lastSentMessageRef.current = tempMessage;
+        processedEchoesRef.current.clear(); 
+
         try {
-            // Encode data to Base64 (standard for react-native-ble-plx writes)
-            const encodedData = encodeData(textToSend);
+            const encodedData = encodeData(tempMessage.text);
             
             await manager.writeCharacteristicWithResponseForDevice(
                 connectedDevice.id,
@@ -496,18 +562,18 @@ export default function App() {
                 encodedData
             );
             
-            logMessage('system', 'Datos enviados.');
-            logMessage('me', textToSend, isSOS);
+            logMessage('system', `Datos enviados: "${tempMessage.text}" (con confirmación).`);
 
         } catch (e) {
             Alert.alert("Error de Envío", `Fallo al enviar datos: ${e.message}`);
             setError(`Error al escribir: ${e.message}`);
             logMessage('system', `Error al escribir nativo: ${e.message}`);
             
-            // Check if error is due to disconnection and clean up
             if (e.message.includes('disconnected')) {
                 cleanupAndDisconnect(connectedDevice.id, connectedDevice.name);
             }
+            // Si falla, limpiar el buffer para no esperar un eco
+            lastSentMessageRef.current = null;
         }
     };
 
@@ -550,7 +616,6 @@ export default function App() {
     );
 }
 
-// ... (Stylesheet remains unchanged) ...
 const styles = StyleSheet.create({
     appContainer: {
         flex: 1,
@@ -722,15 +787,15 @@ const styles = StyleSheet.create({
     },
     messagesContainer: {
         flex: 1,
-        paddingHorizontal: 16,
     },
     messagesContent: {
         paddingTop: 16,
         paddingBottom: 16,
+        paddingHorizontal: 10,
     },
     bubbleBase: {
-        maxWidth: '80%',
-        paddingVertical: 8,
+        maxWidth: width * 0.8,
+        paddingVertical: 10,
         paddingHorizontal: 16,
         borderRadius: 20,
         marginBottom: 8,
@@ -758,6 +823,7 @@ const styles = StyleSheet.create({
     },
     bubbleText: {
         color: 'white',
+        fontSize: 15,
     },
     systemMessageContainer: {
         alignSelf: 'center',
@@ -773,7 +839,7 @@ const styles = StyleSheet.create({
     inputFooter: {
         flexDirection: 'row',
         alignItems: 'center',
-        padding: 12,
+        padding: 10,
         borderTopWidth: 1,
         borderTopColor: '#374151',
         backgroundColor: '#111827', 
@@ -797,8 +863,9 @@ const styles = StyleSheet.create({
     chatInput: {
         flex: 1,
         backgroundColor: '#374151', 
-        borderRadius: 50,
-        paddingVertical: 10,
+        borderRadius: 25,
+        minHeight: 45,
+        paddingVertical: Platform.OS === 'ios' ? 12 : 10,
         paddingHorizontal: 16,
         color: 'white',
         marginRight: 8,
