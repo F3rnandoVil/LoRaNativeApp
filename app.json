@@ -13,17 +13,43 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Allow $(PRODUCT_NAME) to connect to bluetooth devices"
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.BLUETOOTH", 
+        "android.permission.BLUETOOTH_ADMIN", 
+        "android.permission.BLUETOOTH_CONNECT", 
+        "android.permission.BLUETOOTH_SCAN", 
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.f3rnandovil.LoRaNativeApp"
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true, 
+          "modes": ["peripheral", "central"], 
+          "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to bluetooth devices" 
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f42a606e-4484-4071-a139-53a21800690f"
+      }
     }
   }
 }
