@@ -248,6 +248,7 @@ export default function App() {
     const [connectedDevice, setConnectedDevice] = useState(null);
     const notifySubscriptionRef = useRef(null); 
     const isScanningRef = useRef(false); 
+    // 💡 NUEVO REF: Para almacenar y limpiar el timeout del escaneo
     const scanTimeoutRef = useRef(null); 
 
     // Almacena el ID y texto del último mensaje enviado para filtrar el eco.
@@ -316,30 +317,22 @@ export default function App() {
     const cleanupAndDisconnect = useCallback(async (deviceId, deviceName = 'Dispositivo') => {
         logMessage('system', `Intentando desconectar de ${deviceName}...`);
 
-        // 1. Remove the monitor subscription FIRST
         if (notifySubscriptionRef.current) {
             notifySubscriptionRef.current.remove();
             notifySubscriptionRef.current = null;
         }
 
-        // 2. Cancel the native connection
         if (deviceId) {
             await manager.cancelDeviceConnection(deviceId).catch(e => {
                 console.log("Error during disconnect (may be already disconnected):", e.message);
             });
         }
         
-        // 3. Reset state and navigate
         setConnectedDevice(null);
         setStatus('Disconnected');
-        
-        // 💡 WORKAROUND: Delay navigation slightly to let native thread finish cleanup
-        setTimeout(() => {
-            if (screen === 'chat') { 
-                setScreen('scan');
-            }
-        }, 100); 
-        
+        if (screen === 'chat') { 
+            setScreen('scan');
+        }
         logMessage('system', `Desconectado.`);
     }, [logMessage, screen]); 
 
@@ -354,13 +347,11 @@ export default function App() {
                 }
                 setStatus('Disconnected');
                 if (connectedDevice) {
-                    // Force cleanup if BT turns off while connected
                     cleanupAndDisconnect(connectedDevice.id);
                 }
             }
         }, true); 
 
-        // Cleanup function for the effect
         return () => subscription.remove();
     }, [logMessage, connectedDevice, cleanupAndDisconnect]);
 
@@ -369,16 +360,16 @@ export default function App() {
         logMessage('system', `Intentando conectar a ${device.name}...`);
         
         try {
-            // 1. Detener el escaneo y limpiar el timeout inmediatamente
+            // 1. 💡 FIX: Detener el escaneo y limpiar el timeout inmediatamente
             manager.stopDeviceScan();
             if (scanTimeoutRef.current) {
                 clearTimeout(scanTimeoutRef.current);
                 scanTimeoutRef.current = null;
             }
             logMessage('system', 'Escaneo detenido por usuario para iniciar conexión.');
+            // (El mensaje de "Escaneo detenido por usuario" ahora aparece aquí, lo cual es correcto)
 
 
-            // 2. Conectar y negociar MTU
             const connected = await manager.connectToDevice(device.id, { 
                 autoConnect: false,
                 requestMTU: 256 
@@ -411,6 +402,7 @@ export default function App() {
 
                         const lastSent = lastSentMessageRef.current;
                         
+                        // FILTRADO DE ECO: Comprobamos si el mensaje recibido coincide con el último enviado.
                         const isSelfEcho = lastSent && lastSent.text.trim() === receivedString;
 
                         if (isSelfEcho) {
@@ -427,6 +419,7 @@ export default function App() {
                             }, 500); 
 
                         } else {
+                            // MENSAJE EXTERNO: Si no es un eco de lo último que enviamos, lo registramos como 'other'
                             logMessage('other', receivedString, isSOS);
                         }
                     }
@@ -509,6 +502,7 @@ export default function App() {
         );
     };
 
+    // 💡 MODIFICACIÓN: La función stopScan ahora acepta un argumento
     const stopScan = useCallback((isTimeout = false) => {
         manager.stopDeviceScan();
         isScanningRef.current = false;
@@ -523,7 +517,8 @@ export default function App() {
         if (isTimeout) {
             logMessage('system', 'Escaneo detenido por timeout.');
         } else {
-            // Solo registramos si no fue por conexión (ya lo registramos en connectToDevice)
+            // Este log solo aparece si el usuario detiene manualmente (y no conecta)
+            // Cuando se conecta, el log viene de connectToDevice.
             logMessage('system', 'Escaneo detenido por usuario.'); 
         }
 
@@ -565,6 +560,7 @@ export default function App() {
             logMessage('system', `Datos enviados: "${tempMessage.text}" (con confirmación).`);
 
         } catch (e) {
+            // Si hay un error de escritura, es la causa del problema
             Alert.alert("Error de Envío", `Fallo al enviar datos: ${e.message}`);
             setError(`Error al escribir: ${e.message}`);
             logMessage('system', `Error al escribir nativo: ${e.message}`);
